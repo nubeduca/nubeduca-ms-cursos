@@ -126,7 +126,11 @@ python3.13 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 ## Desplegar
 
-Con las credenciales de la cuenta cargadas (en `nubeduca-backend`: `source scripts/cuenta.sh && cargar_cuenta`):
+En la cuenta de integración (D2) se despliega junto con todo lo demás desde la VM `nubeduca-despliegue`: `scripts/desplegar.sh staging --con-seed` de [`nubeduca-backend`](https://github.com/nubeduca/nubeduca-backend), o solo este servicio con `--solo cursos`.
+
+**Observabilidad (PLT-06):** X-Ray en API Gateway y Lambda, y una alarma de CloudWatch (`nubeduca-<stage>-cursos-eventos-dlq`) si un evento llega a la DLQ del consumidor.
+
+Para desplegarlo a mano en tu propia cuenta, con las credenciales cargadas (en `nubeduca-backend`: `source scripts/cuenta.sh && cargar_cuenta`):
 
 ```bash
 serverless deploy --stage dev
