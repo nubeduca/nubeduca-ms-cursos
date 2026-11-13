@@ -1,0 +1,202 @@
+# ms-cursos: cursos y secciones (ACA-03), matrículas (ACA-04) y anuncios (COL-01).
+# Contrato: nubeduca-contratos/apis/ms-cursos.openapi.yaml · source de eventos: lms.courses
+#
+# Parámetros (serverless deploy --stage dev --param="outbox=pipe"):
+#   busName   bus de EventBridge. Si no se pasa, se lee del SSM /nubeduca/<stage>/bus-name
+#             (lms-<stage>, de infra/base); si no existe, usa 'lms'.
+#   outbox    lambda (por defecto) | pipe. Cómo viaja el outbox del Stream al bus.
+#   authMode  mock (por defecto, hasta AUTH-01) | cognito.
+#
+# Sin `org:` fija: Serverless v4 toma la org de SERVERLESS_ACCESS_KEY (o de `serverless login`),
+# así el mismo archivo se despliega en la cuenta de cualquier integrante.
+service: nubeduca-ms-cursos
+
+params:
+  default:
+    outbox: lambda
+    authMode: mock
+
+custom:
+  busName: ${param:busName, ssm:/nubeduca/${sls:stage}/bus-name, 'lms'}
+  relayEncendido:
+    lambda: true
+    pipe: false
+
+provider:
+  name: aws
+  runtime: python3.13
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 20
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole   # Learner Lab no deja crear roles
+  environment:
+    SERVICIO: ms-cursos
+    EVENT_SOURCE: lms.courses
+    TABLA: ${sls:stage}-t_cursos
+    EVENT_BUS: ${self:custom.busName}
+    AUTH_MODE: ${param:authMode}
+
+package:
+  patterns:
+    - '!tests/**'
+    - '!scripts/**'
+    - '!.venv/**'
+    - '!requirements-dev.txt'
+
+functions:
+  salud:
+    handler: api/salud.lambda_handler
+    events:
+      - http: { path: /health, method: get, cors: true }
+
+  # ACA-03. Con AUTH-01 listo, agrega a cada ruta:
+  #   authorizer: { type: COGNITO_USER_POOLS, arn: ${param:userPoolArn} }
+  cursos:
+    handler: api/cursos.lambda_handler
+    events:
+      - http: { path: /courses, method: get, cors: true }
+      - http: { path: /courses, method: post, cors: true }
+      - http: { path: '/courses/{courseId}', method: get, cors: true }
+      - http: { path: '/courses/{courseId}', method: patch, cors: true }
+      - http: { path: '/courses/{courseId}/publish', method: post, cors: true }
+      - http: { path: '/courses/{courseId}/archive', method: post, cors: true }
+
+  secciones:
+    handler: api/secciones.lambda_handler
+    events:
+      - http: { path: '/courses/{courseId}/sections', method: get, cors: true }
+      - http: { path: '/courses/{courseId}/sections', method: post, cors: true }
+
+  # Outbox -> bus (solo si outbox=lambda). Lee el Stream y publica los EVENTO#.
+  relayOutbox:
+    handler: relay/stream_a_bus.lambda_handler
+    events:
+      - stream:
+          type: dynamodb
+          arn: !GetAtt Tabla.StreamArn
+          enabled: ${self:custom.relayEncendido.${param:outbox}}
+          startingPosition: LATEST
+          batchSize: 10
+          maximumRetryAttempts: 10
+          filterPatterns:
+            - eventName: [INSERT]
+              dynamodb:
+                Keys:
+                  sk:
+                    S: [{ prefix: 'EVENTO#' }]
+
+  # term.started de ms-usuarios: periodos activos donde se pueden crear cursos.
+  # ACA-04 agrega aquí user.provisioned (código institucional -> userId para el CSV).
+  consumidor:
+    handler: consumidores/periodos.lambda_handler
+    events:
+      - sqs:
+          arn: !GetAtt ColaEventos.Arn
+          batchSize: 10
+          functionResponseType: ReportBatchItemFailures
+
+resources:
+  Conditions:
+    UsarPipe: !Equals ['${param:outbox}', 'pipe']
+
+  Resources:
+    # Tabla única: PK tenant_id + sk. El Stream alimenta el outbox.
+    Tabla:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${sls:stage}-t_cursos
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - { AttributeName: tenant_id, AttributeType: S }
+          - { AttributeName: sk, AttributeType: S }
+        KeySchema:
+          - { AttributeName: tenant_id, KeyType: HASH }
+          - { AttributeName: sk, KeyType: RANGE }
+        StreamSpecification:
+          StreamViewType: NEW_IMAGE
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+
+    # Outbox con EventBridge Pipes (outbox=pipe). Falta confirmar que el LabRole lo permita.
+    PipeOutbox:
+      Type: AWS::Pipes::Pipe
+      Condition: UsarPipe
+      Properties:
+        Name: ${self:service}-${sls:stage}-outbox
+        RoleArn: arn:aws:iam::${aws:accountId}:role/LabRole
+        Source: !GetAtt Tabla.StreamArn
+        SourceParameters:
+          DynamoDBStreamParameters:
+            StartingPosition: LATEST
+            BatchSize: 1
+            MaximumRetryAttempts: 10
+          FilterCriteria:
+            Filters:
+              - Pattern: '{"eventName":["INSERT"],"dynamodb":{"Keys":{"sk":{"S":[{"prefix":"EVENTO#"}]}}}}'
+        Target: arn:aws:events:${aws:region}:${aws:accountId}:event-bus/${self:custom.busName}
+        TargetParameters:
+          InputTemplate: '<$.dynamodb.NewImage.detail.S>'
+          EventBridgeEventBusParameters:
+            Source: '$.dynamodb.NewImage.source.S'
+            DetailType: '$.dynamodb.NewImage.detailType.S'
+
+    # --- Consumidor: regla del bus -> cola -> Lambda (DLQ tras 5 intentos) ----------
+    ColaEventosDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: nubeduca-${sls:stage}-cursos-eventos-dlq
+        MessageRetentionPeriod: 1209600
+
+    ColaEventos:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: nubeduca-${sls:stage}-cursos-eventos
+        VisibilityTimeout: 120
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt ColaEventosDLQ.Arn
+          maxReceiveCount: 5
+
+    ReglaConsumidor:
+      Type: AWS::Events::Rule
+      Properties:
+        Name: nubeduca-${sls:stage}-cursos
+        EventBusName: ${self:custom.busName}
+        EventPattern:
+          source: [lms.users]
+          detail-type: [lms.users.term.started.v1]
+        Targets:
+          - Id: cola-cursos
+            Arn: !GetAtt ColaEventos.Arn
+
+    PoliticaColaEventos:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues: [!Ref ColaEventos]
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal: { Service: events.amazonaws.com }
+              Action: sqs:SendMessage
+              Resource: !GetAtt ColaEventos.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: !GetAtt ReglaConsumidor.Arn
+
+    # URL de la API para el frontend (infra/frontend de nubeduca-backend la lee de aquí).
+    ApiUrlParam:
+      Type: AWS::SSM::Parameter
+      Properties:
+        Name: /nubeduca/${sls:stage}/api/cursos/url
+        Type: String
+        Value: !Join ['', ['https://', !Ref ApiGatewayRestApi, '.execute-api.${aws:region}.amazonaws.com/${sls:stage}']]
+
+  Outputs:
+    TablaNombre:
+      Value: !Ref Tabla
+    ColaEventosUrl:
+      Value: !Ref ColaEventos
+    ApiUrl:
+      Value: !Join ['', ['https://', !Ref ApiGatewayRestApi, '.execute-api.${aws:region}.amazonaws.com/${sls:stage}']]
