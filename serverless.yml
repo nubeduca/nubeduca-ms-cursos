@@ -31,6 +31,10 @@ provider:
   timeout: 20
   iam:
     role: arn:aws:iam::${aws:accountId}:role/LabRole   # Learner Lab no deja crear roles
+  # PLT-06: trazas de API Gateway y Lambda en X-Ray.
+  tracing:
+    apiGateway: true
+    lambda: true
   environment:
     SERVICIO: ms-cursos
     EVENT_SOURCE: lms.courses
@@ -184,6 +188,24 @@ resources:
               Condition:
                 ArnEquals:
                   aws:SourceArn: !GetAtt ReglaConsumidor.Arn
+
+    # PLT-06: alarma si algún evento termina en la DLQ (falló 5 veces).
+    AlarmaDLQ:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: nubeduca-${sls:stage}-cursos-eventos-dlq
+        AlarmDescription: Hay eventos que ms-cursos no pudo procesar
+        Namespace: AWS/SQS
+        MetricName: ApproximateNumberOfMessagesVisible
+        Dimensions:
+          - Name: QueueName
+            Value: !GetAtt ColaEventosDLQ.QueueName
+        Statistic: Maximum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 1
+        ComparisonOperator: GreaterThanOrEqualToThreshold
+        TreatMissingData: notBreaching
 
     # URL de la API para el frontend (infra/frontend de nubeduca-backend la lee de aquí).
     ApiUrlParam:
