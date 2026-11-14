@@ -11,6 +11,9 @@ Usa las credenciales de AWS del entorno (en nubeduca-backend: source scripts/cue
 - Es idempotente: los ids son fijos, así que correrlo otra vez reescribe los mismos ítems.
 - Cada tenant recibe un periodo de seed activo (PROY#TERM#trm_...SEED) y sus cursos van en él.
 - 60 % PUBLISHED, 30 % DRAFT y 10 % ARCHIVED, de 20 docentes de seed por tenant.
+- ACA-04: proyecta los usuarios demo del frontend (PROY#USER# y PROY#USERCODE#) para que la
+  importación CSV funcione antes de ACA-02. Cuando ms-usuarios publique user.provisioned,
+  el consumidor escribe los mismos ítems.
 """
 
 import argparse
@@ -56,6 +59,27 @@ def _curso(tenant: str, n: int) -> list[dict]:
     return [curso, codigo]
 
 
+# Usuarios demo del frontend (nubeduca-frontend/src/lib/demo-users.ts y mocks/fixtures/users.ts).
+USUARIOS_DEMO = {
+    "utec": [("11111111-1111-4111-8111-111111111111", "STUDENT", "202310457"),
+             ("22222222-2222-4222-8222-222222222222", "TEACHER", "DOC-UTEC-001")],
+    "upc": [("44444444-4444-4444-8444-444444444444", "STUDENT", "202311457"),
+            ("55555555-5555-4555-8555-555555555555", "TEACHER", "DOC-UPC-001")],
+    "pucp": [("77777777-7777-4777-8777-777777777777", "STUDENT", "202312457"),
+             ("88888888-8888-4888-8888-888888888888", "TEACHER", "DOC-PUCP-001")],
+}
+
+
+def _usuarios_demo(tenant: str) -> list[dict]:
+    items = []
+    for user_id, rol, codigo in USUARIOS_DEMO.get(tenant, []):
+        items.append({"tenant_id": tenant, "sk": comun.sk_usuario(user_id), "entidad": "PROYECCION",
+                      "userId": user_id, "role": rol, "institutionalCode": codigo, "seed": True})
+        items.append({"tenant_id": tenant, "sk": comun.sk_codigo_usuario(codigo), "entidad": "PROYECCION",
+                      "userId": user_id, "role": rol, "seed": True})
+    return items
+
+
 def poblar(reparto: dict[str, int] = REPARTO) -> dict[str, int]:
     """Devuelve {tenant: cursos escritos}."""
     escritos = {}
@@ -64,6 +88,8 @@ def poblar(reparto: dict[str, int] = REPARTO) -> dict[str, int]:
             lote.put_item(Item={"tenant_id": tenant, "sk": comun.sk_periodo(TERM_SEED), "entidad": "PROYECCION",
                                 "termId": TERM_SEED, "name": "SEED", "startsOn": "2026-08-17",
                                 "endsOn": "2026-12-12", "status": "ACTIVE", "seed": True})
+            for item in _usuarios_demo(tenant):
+                lote.put_item(Item=item)
             for n in range(1, cantidad + 1):
                 for item in _curso(tenant, n):
                     lote.put_item(Item=item)

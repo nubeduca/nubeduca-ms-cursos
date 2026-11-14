@@ -5,17 +5,17 @@ Microservicio de **cursos, secciones, matrículas y anuncios** de Nubeduca. Se c
 | Tarea | Responsable | Estado |
 |---|---|---|
 | ACA-03 · Cursos y Secciones | Dev 3 @btoroled, Dev 4 @Edinson695 | Cursos con ciclo DRAFT → PUBLISHED → ARCHIVED, secciones, consumidor de `term.started` y seed de 30.000 cursos |
-| ACA-04 · Matrícula e importación CSV | Dev 3 @btoroled | Pendiente (depende de ACA-02 y ACA-03) |
+| ACA-04 · Matrícula e importación CSV | Dev 3 @btoroled, Dev 6 @Guillermo-Heredia | Matrícula manual y por CSV, retiro, `enrollment.created`/`dropped`, consumidor de `user.provisioned` y "mis cursos" del alumno |
 | COL-01 · Anuncios | Dev 3 @btoroled | Pendiente (depende de ACA-04) |
 
-## API (ACA-03)
+## API (ACA-03 y ACA-04)
 
 El tenant sale siempre del token (`custom:tenant_id`, o `Bearer mock.<tenant>.<ROL>.<userId>` en modo mock), nunca de la ruta ni del body.
 
 | Método y ruta | Roles | Qué hace | Evento |
 |---|---|---|---|
 | `GET /health` | pública | Prueba de vida | |
-| `GET /courses?termId=&status=&limit=&nextToken=` | STUDENT, TEACHER, ADMIN | ADMIN: todos. TEACHER: los suyos. STUDENT: los PUBLISHED donde está matriculado (ACA-04; hasta entonces, ninguno) | |
+| `GET /courses?termId=&status=&limit=&nextToken=` | STUDENT, TEACHER, ADMIN | ADMIN: todos. TEACHER: los suyos. STUDENT: los PUBLISHED donde está matriculado | |
 | `POST /courses` | TEACHER, ADMIN | Crea en `DRAFT`. 409 `PERIODO_NO_ACTIVO` o `CURSO_DUPLICADO` (mismo `code` en el periodo) | `lms.courses.course.created.v1` |
 | `GET /courses/{courseId}` | quien puede ver el curso | Al alumno sin acceso se le responde 404; al docente que no es dueño, 403 | |
 | `PATCH /courses/{courseId}` | TEACHER dueño, ADMIN | Solo `title` y `description`. 409 `CURSO_ARCHIVADO` | |
@@ -23,6 +23,10 @@ El tenant sale siempre del token (`custom:tenant_id`, o `Bearer mock.<tenant>.<R
 | `POST /courses/{courseId}/archive` | TEACHER dueño, ADMIN | `DRAFT` o `PUBLISHED` → `ARCHIVED` (solo lectura). 409 `CURSO_ARCHIVADO` | `lms.courses.course.archived.v1` |
 | `GET /courses/{courseId}/sections` | quien puede ver el curso | Secciones, en orden de creación | |
 | `POST /courses/{courseId}/sections` | TEACHER dueño, ADMIN | Crea una sección. 409 `CURSO_ARCHIVADO` | |
+| `GET /courses/{courseId}/enrollments?role=&limit=&nextToken=` | TEACHER dueño o matriculado, ADMIN | Matriculados del curso | |
+| `POST /courses/{courseId}/enrollments` | TEACHER dueño, ADMIN | `{userId, role, sectionId?}`. 409 `YA_MATRICULADO` o `CURSO_ARCHIVADO` | `lms.courses.enrollment.created.v1` |
+| `POST /courses/{courseId}/enrollments/import` | TEACHER dueño, ADMIN | CSV `institutionalCode,role,section` (hasta 2.000 filas) → `{created, skipped, errors[{line, code, institutionalCode}]}`. Errores por fila: `USUARIO_NO_EXISTE`, `ROL_INVALIDO`, `SECCION_NO_EXISTE`, `CODIGO_VACIO` | uno `enrollment.created` por fila creada |
+| `DELETE /courses/{courseId}/enrollments/{enrollmentId}` | TEACHER dueño, ADMIN | Retira al usuario. 404 `MATRICULA_NO_ENCONTRADA` | `lms.courses.enrollment.dropped.v1` |
 
 Los errores tienen la forma `{code, message, requestId}`.
 
@@ -33,9 +37,12 @@ Los errores tienen la forma `{code, message, requestId}`.
 | `lms.courses.course.created.v1` | publica → ms-contenidos | `POST /courses` |
 | `lms.courses.course.published.v1` | publica → ms-notificaciones | `POST /courses/{id}/publish` |
 | `lms.courses.course.archived.v1` | publica | `POST /courses/{id}/archive` |
+| `lms.courses.enrollment.created.v1` | publica → ms-contenidos, ms-evaluaciones, ms-calificaciones, ms-notificaciones | `POST .../enrollments` y cada fila creada del CSV |
+| `lms.courses.enrollment.dropped.v1` | publica | `DELETE .../enrollments/{enrollmentId}` |
 | `lms.users.term.started.v1` | consume ← ms-usuarios | Guarda el periodo como activo en `PROY#TERM#<termId>` |
+| `lms.users.user.provisioned.v1` | consume ← ms-usuarios | Guarda `PROY#USER#<userId>` y `PROY#USERCODE#<código>` para el CSV |
 
-Los eventos propios salen por **outbox**: el cambio y el ítem `EVENTO#<eventId>` van en la misma `TransactWriteItems`, y antes se validan contra su JSON Schema de `nubeduca-contratos` (`contratos/esquemas/`). Los eventos del curso llevan `metadata.courseId` y una `aggregateVersion` que sube con cada transición (1 creado, 2 publicado, 3 archivado). El consumidor usa el inbox de la plantilla: descarta duplicados y eventos viejos, y los fallos van a la DLQ tras 5 intentos.
+Los eventos propios salen por **outbox**: el cambio y el ítem `EVENTO#<eventId>` van en la misma `TransactWriteItems`, y antes se validan contra su JSON Schema de `nubeduca-contratos` (`contratos/esquemas/`). Los eventos del curso llevan `metadata.courseId` y una `aggregateVersion` que sube con cada transición (1 creado, 2 publicado, 3 archivado). Los de matrícula usan `aggregateType: enrollment`, versión 1 al crear y 2 al retirar. El consumidor usa el inbox de la plantilla: descarta duplicados y eventos viejos, y los fallos van a la DLQ tras 5 intentos.
 
 ## Tabla `<stage>-t_cursos`
 
@@ -47,7 +54,10 @@ PK `tenant_id` (HASH) + `sk` (RANGE), `PAY_PER_REQUEST`, Stream `NEW_IMAGE` y TT
 | `COURSECODE#<termId>#<code>` | Reserva del código del curso dentro del periodo (409 si se repite) |
 | `SECTION#<courseId>#<sectionId>` | Sección del curso |
 | `PROY#TERM#<termId>` | Periodo activo, proyección de `term.started` |
-| `ENROLL#<courseId>#<userId>` | Reservado para ACA-04 (matrícula) |
+| `ENROLL#<courseId>#<userId>` | Matrícula (`enrollmentId`, `role`, `sectionId`, `createdAt`) |
+| `ENROLLID#<enrollmentId>` | Puntero a la matrícula, para el `DELETE` |
+| `USERCOURSE#<userId>#<courseId>` | Cursos de un usuario (`GET /courses` del alumno) |
+| `PROY#USER#<userId>` · `PROY#USERCODE#<código>` | Proyección de `user.provisioned`. El seed carga los usuarios demo del frontend (Ana UTEC `202310457`, etc.) para usar el CSV antes de ACA-02 |
 | `EVENTO#`, `INBOX#`, `AGG#` | Outbox, inbox y versión de agregados de la plantilla |
 
 ```json
