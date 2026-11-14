@@ -196,6 +196,34 @@ def transicion(event, usuario, accion: str):
     return http.respuesta(200, comun.a_curso(curso | {"status": destino}))
 
 
+def _cursos_del_alumno(event, usuario, params: dict, limite: int) -> dict:
+    """ACA-04: cursos PUBLISHED donde el alumno está matriculado (índice USERCOURSE#<userId>#)."""
+    prefijo = comun.sk_curso_de_usuario(usuario.user_id)
+    token = params.get("nextToken")
+    clave = comun.decodificar(token, usuario.tenant_id, prefijo) if token else None
+    if token and clave is None:
+        return http.datos_invalidos(event, "nextToken no es válido.")
+    encontrados = []
+    while True:
+        consulta = {"KeyConditionExpression": Key("tenant_id").eq(usuario.tenant_id) & Key("sk").begins_with(prefijo),
+                    "Limit": limite - len(encontrados)}
+        if clave:
+            consulta["ExclusiveStartKey"] = clave
+        resultado = t.tabla().query(**consulta)
+        for indice in resultado.get("Items", []):
+            curso = t.tabla().get_item(
+                Key={"tenant_id": usuario.tenant_id, "sk": comun.sk_curso(indice["courseId"])}).get("Item")
+            if (curso and curso["status"] == "PUBLISHED"
+                    and (not params.get("termId") or curso["termId"] == params["termId"])
+                    and (not params.get("status") or curso["status"] == params["status"])):
+                encontrados.append(curso)
+        clave = resultado.get("LastEvaluatedKey")
+        if clave is None or len(encontrados) >= limite:
+            break
+    return http.respuesta(200, {"items": [comun.a_curso(i) for i in encontrados],
+                                "nextToken": comun.codificar(clave)})
+
+
 def listar(event, usuario):
     params = (event or {}).get("queryStringParameters") or {}
     limite = comun.limite(params)
@@ -205,15 +233,14 @@ def listar(event, usuario):
         return http.datos_invalidos(event, "status debe ser DRAFT, PUBLISHED o ARCHIVED.")
     if params.get("termId") and not comun.TERM_ID.match(params["termId"]):
         return http.datos_invalidos(event, "termId no es un id de periodo válido.")
+    if usuario.rol == "STUDENT":
+        return _cursos_del_alumno(event, usuario, params, limite)
+
     inicio = None
     if params.get("nextToken"):
         inicio = comun.decodificar(params["nextToken"], usuario.tenant_id, "COURSE#")
         if inicio is None:
             return http.datos_invalidos(event, "nextToken no es válido.")
-
-    if usuario.rol == "STUDENT":
-        # Los cursos del alumno salen de sus matrículas (ACA-04). Sin matrículas, no ve ninguno.
-        return http.respuesta(200, {"items": [], "nextToken": None})
 
     filtro = None
     for condicion in (

@@ -69,6 +69,16 @@ functions:
       - http: { path: '/courses/{courseId}/sections', method: get, cors: true }
       - http: { path: '/courses/{courseId}/sections', method: post, cors: true }
 
+  # ACA-04. timeout 28 s: la importación CSV (hasta 2.000 filas) cabe en los 29 s de API Gateway.
+  matriculas:
+    handler: api/matriculas.lambda_handler
+    timeout: 28
+    events:
+      - http: { path: '/courses/{courseId}/enrollments', method: get, cors: true }
+      - http: { path: '/courses/{courseId}/enrollments', method: post, cors: true }
+      - http: { path: '/courses/{courseId}/enrollments/import', method: post, cors: true }
+      - http: { path: '/courses/{courseId}/enrollments/{enrollmentId}', method: delete, cors: true }
+
   # Outbox -> bus (solo si outbox=lambda). Lee el Stream y publica los EVENTO#.
   relayOutbox:
     handler: relay/stream_a_bus.lambda_handler
@@ -87,10 +97,10 @@ functions:
                   sk:
                     S: [{ prefix: 'EVENTO#' }]
 
-  # term.started de ms-usuarios: periodos activos donde se pueden crear cursos.
-  # ACA-04 agrega aquí user.provisioned (código institucional -> userId para el CSV).
+  # De ms-usuarios: term.started (periodos activos donde se crean cursos) y
+  # user.provisioned (código institucional -> userId para el CSV de ACA-04).
   consumidor:
-    handler: consumidores/periodos.lambda_handler
+    handler: consumidores/eventos.lambda_handler
     events:
       - sqs:
           arn: !GetAtt ColaEventos.Arn
@@ -166,7 +176,7 @@ resources:
         EventBusName: ${self:custom.busName}
         EventPattern:
           source: [lms.users]
-          detail-type: [lms.users.term.started.v1]
+          detail-type: [lms.users.term.started.v1, lms.users.user.provisioned.v1]
         Targets:
           - Id: cola-cursos
             Arn: !GetAtt ColaEventos.Arn

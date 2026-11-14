@@ -29,9 +29,29 @@ def sk_periodo(term_id: str) -> str:
     return f"PROY#TERM#{term_id}"
 
 
-def sk_matricula(course_id: str, user_id: str) -> str:
-    """Reservado para ACA-04: existe si el usuario está matriculado en el curso."""
+def sk_matricula(course_id: str, user_id: str = "") -> str:
+    """ACA-04: existe si el usuario está matriculado en el curso."""
     return f"ENROLL#{course_id}#{user_id}"
+
+
+def sk_matricula_id(enrollment_id: str) -> str:
+    """Puntero enrollmentId -> (courseId, userId), para DELETE /enrollments/{enrollmentId}."""
+    return f"ENROLLID#{enrollment_id}"
+
+
+def sk_curso_de_usuario(user_id: str, course_id: str = "") -> str:
+    """Índice inverso de la matrícula: los cursos de un usuario (GET /courses del alumno)."""
+    return f"USERCOURSE#{user_id}#{course_id}"
+
+
+def sk_usuario(user_id: str) -> str:
+    """Proyección de lms.users.user.provisioned.v1."""
+    return f"PROY#USER#{user_id}"
+
+
+def sk_codigo_usuario(codigo: str) -> str:
+    """Código institucional -> userId, para la importación CSV."""
+    return f"PROY#USERCODE#{codigo}"
 
 
 def a_curso(item: dict) -> dict:
@@ -62,6 +82,8 @@ def puede_ver(usuario, curso: dict) -> bool:
         return True
     if usuario.rol == "STUDENT":
         return curso["status"] == "PUBLISHED" and matriculado(usuario, curso["courseId"])
+    if usuario.rol == "TEACHER":  # docente matriculado en un curso de otro dueño (ACA-04)
+        return matriculado(usuario, curso["courseId"])
     return False
 
 
