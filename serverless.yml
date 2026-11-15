@@ -79,6 +79,13 @@ functions:
       - http: { path: '/courses/{courseId}/enrollments/import', method: post, cors: true }
       - http: { path: '/courses/{courseId}/enrollments/{enrollmentId}', method: delete, cors: true }
 
+  # COL-01. Publicar un anuncio emite announcement.published; ms-notificaciones avisa a los matriculados.
+  anuncios:
+    handler: api/anuncios.lambda_handler
+    events:
+      - http: { path: '/courses/{courseId}/announcements', method: get, cors: true }
+      - http: { path: '/courses/{courseId}/announcements', method: post, cors: true }
+
   # Outbox -> bus (solo si outbox=lambda). Lee el Stream y publica los EVENTO#.
   relayOutbox:
     handler: relay/stream_a_bus.lambda_handler
