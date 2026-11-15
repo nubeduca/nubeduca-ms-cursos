@@ -6,9 +6,9 @@ Microservicio de **cursos, secciones, matrículas y anuncios** de Nubeduca. Se c
 |---|---|---|
 | ACA-03 · Cursos y Secciones | Dev 3 @btoroled, Dev 4 @Edinson695 | Cursos con ciclo DRAFT → PUBLISHED → ARCHIVED, secciones, consumidor de `term.started` y seed de 30.000 cursos |
 | ACA-04 · Matrícula e importación CSV | Dev 3 @btoroled, Dev 6 @Guillermo-Heredia | Matrícula manual y por CSV, retiro, `enrollment.created`/`dropped`, consumidor de `user.provisioned` y "mis cursos" del alumno |
-| COL-01 · Anuncios | Dev 3 @btoroled | Pendiente (depende de ACA-04) |
+| COL-01 · Anuncios | Dev 3 @btoroled | Anuncios por curso y `announcement.published`, que ms-notificaciones lleva a cada matriculado |
 
-## API (ACA-03 y ACA-04)
+## API (ACA-03, ACA-04 y COL-01)
 
 El tenant sale siempre del token (`custom:tenant_id`, o `Bearer mock.<tenant>.<ROL>.<userId>` en modo mock), nunca de la ruta ni del body.
 
@@ -27,6 +27,8 @@ El tenant sale siempre del token (`custom:tenant_id`, o `Bearer mock.<tenant>.<R
 | `POST /courses/{courseId}/enrollments` | TEACHER dueño, ADMIN | `{userId, role, sectionId?}`. 409 `YA_MATRICULADO` o `CURSO_ARCHIVADO` | `lms.courses.enrollment.created.v1` |
 | `POST /courses/{courseId}/enrollments/import` | TEACHER dueño, ADMIN | CSV `institutionalCode,role,section` (hasta 2.000 filas) → `{created, skipped, errors[{line, code, institutionalCode}]}`. Errores por fila: `USUARIO_NO_EXISTE`, `ROL_INVALIDO`, `SECCION_NO_EXISTE`, `CODIGO_VACIO` | uno `enrollment.created` por fila creada |
 | `DELETE /courses/{courseId}/enrollments/{enrollmentId}` | TEACHER dueño, ADMIN | Retira al usuario. 404 `MATRICULA_NO_ENCONTRADA` | `lms.courses.enrollment.dropped.v1` |
+| `GET /courses/{courseId}/announcements?limit=&nextToken=` | quien puede ver el curso | Anuncios, el más reciente primero | |
+| `POST /courses/{courseId}/announcements` | TEACHER **matriculado como TEACHER** en el curso (ser dueño no alcanza) | `{title, body}`. 409 `CURSO_NO_PUBLICADO` si el curso no está `PUBLISHED` | `lms.courses.announcement.published.v1` |
 
 Los errores tienen la forma `{code, message, requestId}`.
 
@@ -39,6 +41,7 @@ Los errores tienen la forma `{code, message, requestId}`.
 | `lms.courses.course.archived.v1` | publica | `POST /courses/{id}/archive` |
 | `lms.courses.enrollment.created.v1` | publica → ms-contenidos, ms-evaluaciones, ms-calificaciones, ms-notificaciones | `POST .../enrollments` y cada fila creada del CSV |
 | `lms.courses.enrollment.dropped.v1` | publica | `DELETE .../enrollments/{enrollmentId}` |
+| `lms.courses.announcement.published.v1` | publica → ms-notificaciones | `POST .../announcements`. Lleva `announcementId`, `authorId` y `title`; el cuerpo se lee con `GET` |
 | `lms.users.term.started.v1` | consume ← ms-usuarios | Guarda el periodo como activo en `PROY#TERM#<termId>` |
 | `lms.users.user.provisioned.v1` | consume ← ms-usuarios | Guarda `PROY#USER#<userId>` y `PROY#USERCODE#<código>` para el CSV |
 
@@ -57,6 +60,7 @@ PK `tenant_id` (HASH) + `sk` (RANGE), `PAY_PER_REQUEST`, Stream `NEW_IMAGE` y TT
 | `ENROLL#<courseId>#<userId>` | Matrícula (`enrollmentId`, `role`, `sectionId`, `createdAt`) |
 | `ENROLLID#<enrollmentId>` | Puntero a la matrícula, para el `DELETE` |
 | `USERCOURSE#<userId>#<courseId>` | Cursos de un usuario (`GET /courses` del alumno) |
+| `ANN#<courseId>#<announcementId>` | Anuncio (`title`, `body`, `authorId`, `publishedAt`); el ULID ordena del más reciente al más antiguo |
 | `PROY#USER#<userId>` · `PROY#USERCODE#<código>` | Proyección de `user.provisioned`. El seed carga los usuarios demo del frontend (Ana UTEC `202310457`, etc.) para usar el CSV antes de ACA-02 |
 | `EVENTO#`, `INBOX#`, `AGG#` | Outbox, inbox y versión de agregados de la plantilla |
 
