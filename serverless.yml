@@ -17,6 +17,13 @@ params:
     authMode: mock
 
 custom:
+  # REL-02: authorizer de Cognito en las rutas, solo con authMode=cognito. Con mock no hay
+  # authorizer (API Gateway rechazaria los tokens mock) y lib/auth.py lee el token del header.
+  userPoolArn: ${param:userPoolArn, cf:nubeduca-infra-auth-${sls:stage}.UserPoolArn, ''}
+  autorizador:
+    cognito:
+      type: COGNITO_USER_POOLS
+      arn: ${self:custom.userPoolArn}
   busName: ${param:busName, ssm:/nubeduca/${sls:stage}/bus-name, 'lms'}
   relayEncendido:
     lambda: true
@@ -60,35 +67,35 @@ functions:
   cursos:
     handler: api/cursos.lambda_handler
     events:
-      - http: { path: /courses, method: get, cors: true }
-      - http: { path: /courses, method: post, cors: true }
-      - http: { path: '/courses/{courseId}', method: get, cors: true }
-      - http: { path: '/courses/{courseId}', method: patch, cors: true }
-      - http: { path: '/courses/{courseId}/publish', method: post, cors: true }
-      - http: { path: '/courses/{courseId}/archive', method: post, cors: true }
+      - http: { path: /courses, method: get, cors: true, authorizer: '${self:custom.autorizador.${param:authMode}, null}' }
+      - http: { path: /courses, method: post, cors: true, authorizer: '${self:custom.autorizador.${param:authMode}, null}' }
+      - http: { path: '/courses/{courseId}', method: get, cors: true, authorizer: '${self:custom.autorizador.${param:authMode}, null}' }
+      - http: { path: '/courses/{courseId}', method: patch, cors: true, authorizer: '${self:custom.autorizador.${param:authMode}, null}' }
+      - http: { path: '/courses/{courseId}/publish', method: post, cors: true, authorizer: '${self:custom.autorizador.${param:authMode}, null}' }
+      - http: { path: '/courses/{courseId}/archive', method: post, cors: true, authorizer: '${self:custom.autorizador.${param:authMode}, null}' }
 
   secciones:
     handler: api/secciones.lambda_handler
     events:
-      - http: { path: '/courses/{courseId}/sections', method: get, cors: true }
-      - http: { path: '/courses/{courseId}/sections', method: post, cors: true }
+      - http: { path: '/courses/{courseId}/sections', method: get, cors: true, authorizer: '${self:custom.autorizador.${param:authMode}, null}' }
+      - http: { path: '/courses/{courseId}/sections', method: post, cors: true, authorizer: '${self:custom.autorizador.${param:authMode}, null}' }
 
   # ACA-04. timeout 28 s: la importación CSV (hasta 2.000 filas) cabe en los 29 s de API Gateway.
   matriculas:
     handler: api/matriculas.lambda_handler
     timeout: 28
     events:
-      - http: { path: '/courses/{courseId}/enrollments', method: get, cors: true }
-      - http: { path: '/courses/{courseId}/enrollments', method: post, cors: true }
-      - http: { path: '/courses/{courseId}/enrollments/import', method: post, cors: true }
-      - http: { path: '/courses/{courseId}/enrollments/{enrollmentId}', method: delete, cors: true }
+      - http: { path: '/courses/{courseId}/enrollments', method: get, cors: true, authorizer: '${self:custom.autorizador.${param:authMode}, null}' }
+      - http: { path: '/courses/{courseId}/enrollments', method: post, cors: true, authorizer: '${self:custom.autorizador.${param:authMode}, null}' }
+      - http: { path: '/courses/{courseId}/enrollments/import', method: post, cors: true, authorizer: '${self:custom.autorizador.${param:authMode}, null}' }
+      - http: { path: '/courses/{courseId}/enrollments/{enrollmentId}', method: delete, cors: true, authorizer: '${self:custom.autorizador.${param:authMode}, null}' }
 
   # COL-01. Publicar un anuncio emite announcement.published; ms-notificaciones avisa a los matriculados.
   anuncios:
     handler: api/anuncios.lambda_handler
     events:
-      - http: { path: '/courses/{courseId}/announcements', method: get, cors: true }
-      - http: { path: '/courses/{courseId}/announcements', method: post, cors: true }
+      - http: { path: '/courses/{courseId}/announcements', method: get, cors: true, authorizer: '${self:custom.autorizador.${param:authMode}, null}' }
+      - http: { path: '/courses/{courseId}/announcements', method: post, cors: true, authorizer: '${self:custom.autorizador.${param:authMode}, null}' }
 
   # Outbox -> bus (solo si outbox=lambda). Lee el Stream y publica los EVENTO#.
   relayOutbox:
@@ -123,6 +130,25 @@ resources:
     UsarPipe: !Equals ['${param:outbox}', 'pipe']
 
   Resources:
+    # REL-02: los errores de API Gateway (p.ej. 401 del authorizer) tambien llevan CORS.
+    RespuestaGateway4XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        RestApiId: !Ref ApiGatewayRestApi
+        ResponseType: DEFAULT_4XX
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+
+    RespuestaGateway5XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        RestApiId: !Ref ApiGatewayRestApi
+        ResponseType: DEFAULT_5XX
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+
     # Tabla única: PK tenant_id + sk. El Stream alimenta el outbox.
     Tabla:
       Type: AWS::DynamoDB::Table
